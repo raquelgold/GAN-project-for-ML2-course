@@ -1,0 +1,400 @@
+def reproduce_hw4():
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torchvision import transforms, datasets
+    from torch.utils.data import DataLoader
+    from torchvision.utils import save_image, make_grid
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.manifold import TSNE
+    from sklearn.decomposition import PCA
+    import os
+    import requests
+    import tarfile
+    from tqdm import tqdm
+    import shutil
+    from datetime import datetime
+    import torch
+    import numpy as np
+    import seaborn as sns
+
+    def generate_latent_samples(generator, num_samples, latent_dim, device):
+        """Generate samples from the latent space and their corresponding images"""
+        with torch.no_grad():
+            # Generate random latent vectors
+            latent_vectors = torch.randn(num_samples, latent_dim, 1, 1, device=device)
+            # Generate images
+            generated_images = generator(latent_vectors)
+
+            # Reshape latent vectors for visualization
+            latent_vectors = latent_vectors.squeeze().cpu().numpy()
+            generated_images = generated_images.cpu()
+
+        return latent_vectors, generated_images
+
+    def visualize_latent_space(latent_vectors, generated_images, output_path, method='tsne'):
+        """Visualize the latent space using either t-SNE or PCA"""
+        # Flatten latent vectors if needed
+        latent_flat = latent_vectors.reshape(latent_vectors.shape[0], -1)
+
+        # Apply dimensionality reduction
+        if method.lower() == 'tsne':
+            reducer = TSNE(n_components=2, random_state=42)
+            embedding = reducer.fit_transform(latent_flat)
+            title = 't-SNE Visualization of Latent Space'
+        else:  # PCA
+            reducer = PCA(n_components=2)
+            embedding = reducer.fit_transform(latent_flat)
+            title = 'PCA Visualization of Latent Space'
+
+        # Create the main figure
+        plt.figure(figsize=(20, 10))
+
+        # Plot the embedding
+        plt.subplot(1, 2, 1)
+        scatter = plt.scatter(embedding[:, 0], embedding[:, 1], c=np.arange(len(embedding)),
+                             cmap='viridis', alpha=0.6)
+        plt.colorbar(scatter, label='Sample Index')
+        plt.title(title)
+        plt.xlabel('Dimension 1')
+        plt.ylabel('Dimension 2')
+
+        # Display sample generated images
+        plt.subplot(1, 2, 2)
+        grid_img = make_grid(generated_images[:16], nrow=4, normalize=True).permute(1, 2, 0)
+        plt.imshow(grid_img)
+        plt.title('Sample Generated Images')
+        plt.axis('off')
+
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close()
+
+    def analyze_latent_traversal(generator, latent_dim, device, output_path, num_samples=10):
+        """Analyze how changes in latent dimensions affect the generated images"""
+        with torch.no_grad():
+            # Generate a base latent vector
+            base_vector = torch.randn(1, latent_dim, 1, 1, device=device)
+
+            # Create figure
+            fig, axes = plt.subplots(latent_dim if latent_dim < 5 else 5, num_samples,
+                                    figsize=(20, 4 * min(latent_dim, 5)))
+            if latent_dim == 1:
+                axes = axes[np.newaxis, :]
+
+            # For each dimension (up to 5 for visualization purposes)
+            for dim in range(min(latent_dim, 5)):
+                # Create variations of the base vector
+                values = np.linspace(-2, 2, num_samples)
+                for j, value in enumerate(values):
+                    modified_vector = base_vector.clone()
+                    modified_vector[0, dim, 0, 0] = value
+
+                    # Generate and display image
+                    img = generator(modified_vector)
+                    img = img.cpu().squeeze().permute(1, 2, 0)
+                    img = (img + 1) / 2  # Denormalize
+                    axes[dim, j].imshow(img)
+                    axes[dim, j].axis('off')
+                    if j == 0:
+                        axes[dim, j].set_ylabel(f'Dim {dim}')
+                    if dim == 0:
+                        axes[dim, j].set_title(f'Value: {value:.1f}')
+
+            plt.suptitle('Latent Space Traversal Analysis')
+            plt.tight_layout()
+            plt.savefig(output_path)
+            plt.close()
+
+    def visualize_latent_spaces(generator, config_name, latent_dim, device, output_dir):
+        """Wrapper function to generate all latent space visualizations"""
+        num_samples = 500
+        vis_output_dir = os.path.join(output_dir, config_name, 'latent_visualization')
+        os.makedirs(vis_output_dir, exist_ok=True)
+
+        # Generate samples
+        latent_vectors, generated_images = generate_latent_samples(
+            generator, num_samples, latent_dim, device)
+
+        # Create visualizations
+        visualize_latent_space(latent_vectors, generated_images,
+                              os.path.join(vis_output_dir, 'tsne_visualization.png'),
+                              method='tsne')
+
+        visualize_latent_space(latent_vectors, generated_images,
+                              os.path.join(vis_output_dir, 'pca_visualization.png'),
+                              method='pca')
+
+        analyze_latent_traversal(generator, latent_dim, device,
+                               os.path.join(vis_output_dir, 'latent_traversal.png'))
+
+    class Generator(nn.Module):
+        def __init__(self, latent_dim):
+            super(Generator, self).__init__()
+            self.latent_dim = latent_dim
+            self.main = nn.Sequential(
+                nn.ConvTranspose2d(latent_dim, 512, 4, 1, 0, bias=False),
+                nn.BatchNorm2d(512),
+                nn.ReLU(True),
+
+                nn.ConvTranspose2d(512, 256, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(256),
+                nn.ReLU(True),
+
+                nn.ConvTranspose2d(256, 128, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(128),
+                nn.ReLU(True),
+
+                nn.ConvTranspose2d(128, 64, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(True),
+
+                nn.ConvTranspose2d(64, 3, 4, 2, 1, bias=False),
+                nn.Tanh()
+            )
+
+            self.apply(self._init_weights)
+
+        def _init_weights(self, m):
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                nn.init.normal_(m.weight.data, 0.0, 0.02)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.normal_(m.weight.data, 1.0, 0.02)
+                nn.init.constant_(m.bias.data, 0)
+
+        def forward(self, z):
+            return self.main(z)
+
+    class Discriminator(nn.Module):
+        def __init__(self):
+            super(Discriminator, self).__init__()
+            self.main = nn.Sequential(
+                nn.Conv2d(3, 64, 4, 2, 1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+
+                nn.Conv2d(64, 128, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(128),
+                nn.LeakyReLU(0.2, inplace=True),
+
+                nn.Conv2d(128, 256, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(256),
+                nn.LeakyReLU(0.2, inplace=True),
+
+                nn.Conv2d(256, 512, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(512),
+                nn.LeakyReLU(0.2, inplace=True),
+
+                nn.Conv2d(512, 1, 4, 1, 0, bias=False),
+                nn.Sigmoid()
+            )
+
+            self.apply(self._init_weights)
+
+        def _init_weights(self, m):
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight.data, 0.0, 0.02)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.normal_(m.weight.data, 1.0, 0.02)
+                nn.init.constant_(m.bias.data, 0)
+
+        def forward(self, img):
+            return self.main(img).view(-1)
+
+    def download_and_extract_dataset(url, save_dir):
+        """Download and extract the flowers dataset"""
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        filename = os.path.join(save_dir, "102flowers.tgz")
+        if not os.path.exists(filename):
+            print("Downloading dataset...")
+            response = requests.get(url, stream=True)
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024
+
+            with open(filename, 'wb') as f:
+                for data in tqdm(response.iter_content(block_size),
+                               total=total_size//block_size,
+                               unit='KB', unit_scale=True):
+                    f.write(data)
+
+        print("Extracting dataset...")
+        with tarfile.open(filename, 'r:gz') as tar:
+            tar.extractall(path=save_dir)
+
+        print("Dataset ready!")
+        return os.path.join(save_dir, 'jpg')
+
+    def plot_training_history(histories, output_dir):
+        """Plot training histories for multiple configurations"""
+        plt.figure(figsize=(15, 10))
+
+        plt.subplot(2, 1, 1)
+        for config, history in histories.items():
+            plt.plot(history['g_losses'], label=f'Generator {config}')
+        plt.title('Generator Losses Over Time')
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+
+        plt.subplot(2, 1, 2)
+        for config, history in histories.items():
+            plt.plot(history['d_losses'], label=f'Discriminator {config}')
+        plt.title('Discriminator Losses Over Time')
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'training_history.png'))
+        plt.close()
+
+    def train_gan_configuration(data_dir, output_dir, config_name, batch_size, latent_dim, epochs=80):
+        device = torch.device("cuda")  # Force GPU usage
+        print(f"Using device: {device}")
+
+        config_output_dir = os.path.join(output_dir, config_name)
+        os.makedirs(config_output_dir, exist_ok=True)
+
+        transform = transforms.Compose([
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+
+        dataset = datasets.ImageFolder(root=data_dir, transform=transform)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=2, pin_memory=True)
+
+        generator = Generator(latent_dim).to(device)
+        discriminator = Discriminator().to(device)
+
+        optimizer_g = optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+        optimizer_d = optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
+
+        criterion = nn.BCELoss()
+
+        history = {
+            'g_losses': [],
+            'd_losses': [],
+            'iteration_times': []
+        }
+
+        fixed_noise = torch.randn(64, latent_dim, 1, 1, device=device)
+        start_time = datetime.now()
+
+        for epoch in range(epochs):
+            for i, (real_images, _) in enumerate(dataloader):
+                batch_size = real_images.size(0)
+                real_images = real_images.to(device)
+
+                # Train Discriminator
+                discriminator.zero_grad()
+                label_real = torch.ones(batch_size, device=device) * 0.9  # Label smoothing
+                label_fake = torch.zeros(batch_size, device=device)
+
+                output_real = discriminator(real_images)
+                d_loss_real = criterion(output_real, label_real)
+
+                noise = torch.randn(batch_size, latent_dim, 1, 1, device=device)
+                fake_images = generator(noise)
+                output_fake = discriminator(fake_images.detach())
+                d_loss_fake = criterion(output_fake, label_fake)
+
+                d_loss = d_loss_real + d_loss_fake
+                d_loss.backward()
+                optimizer_d.step()
+
+                # Train Generator
+                generator.zero_grad()
+                output_fake = discriminator(fake_images)
+                g_loss = criterion(output_fake, label_real)
+                g_loss.backward()
+                optimizer_g.step()
+
+                # Record losses
+                history['g_losses'].append(g_loss.item())
+                history['d_losses'].append(d_loss.item())
+                history['iteration_times'].append((datetime.now() - start_time).total_seconds())
+
+                if i % 100 == 0:
+                    print(f'[{config_name}] [{epoch}/{epochs}][{i}/{len(dataloader)}] '
+                          f'Loss_D: {d_loss.item():.4f} Loss_G: {g_loss.item():.4f}')
+
+            # Save sample images
+            if epoch % 10 == 0:
+                with torch.no_grad():
+                    fake = generator(fixed_noise)
+                    save_image(fake.detach(),
+                             os.path.join(config_output_dir, f'samples_epoch_{epoch}.png'),
+                             normalize=True)
+
+                    # Save models
+                    torch.save(generator.state_dict(),
+                             os.path.join(config_output_dir, f'generator_epoch_{epoch}.pth'))
+                    torch.save(discriminator.state_dict(),
+                             os.path.join(config_output_dir, f'discriminator_epoch_{epoch}.pth'))
+
+        # Save the trained models and weights as .pkl
+        import pickle
+        torch.save(generator.state_dict(), os.path.join(config_output_dir, f'generator_{config_name}.pkl'))
+        torch.save(discriminator.state_dict(), os.path.join(config_output_dir, f'discriminator_{config_name}.pkl'))
+
+        print(f"Generating latent space visualizations for {config_name}...")
+        visualize_latent_spaces(generator, config_name, latent_dim, device, output_dir)
+        return history
+
+    def main():
+        # Set random seed for reproducibility
+        torch.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+        torch.backends.cudnn.benchmark = True
+
+        # Setup directories
+        data_dir = "flower_data"
+        output_dir = "flower_gan_output"
+
+        # Download and extract dataset
+        dataset_url = "https://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz"
+        image_dir = download_and_extract_dataset(dataset_url, data_dir)
+
+        # Create a directory structure that works with ImageFolder
+        processed_dir = os.path.join(data_dir, "processed")
+        os.makedirs(os.path.join(processed_dir, "flowers"), exist_ok=True)
+
+        # Move all images to the new structure
+        for img in os.listdir(image_dir):
+            if img.endswith('.jpg'):
+                src_path = os.path.join(image_dir, img)
+                dst_path = os.path.join(processed_dir, "flowers", img)
+                if not os.path.exists(dst_path):
+                    shutil.copy2(src_path, dst_path)
+
+        # Define configurations to test
+        configurations = [
+            {"name": "small_batch_small_latent", "batch_size": 16, "latent_dim": 50},
+            {"name": "medium_batch_medium_latent", "batch_size": 32, "latent_dim": 100},
+            {"name": "large_batch_large_latent", "batch_size": 64, "latent_dim": 200}
+        ]
+
+        # Train all configurations
+        histories = {}
+        for config in configurations:
+            print(f"\nTraining configuration: {config['name']}")
+            history = train_gan_configuration(
+                data_dir=processed_dir,
+                output_dir=output_dir,
+                config_name=config['name'],
+                batch_size=config['batch_size'],
+                latent_dim=config['latent_dim']
+            )
+            histories[config['name']] = history
+
+        # Plot comparative results
+        plot_training_history(histories, output_dir)
+
+    if __name__ == "__main__":
+        main()
